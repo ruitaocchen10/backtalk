@@ -15,6 +15,8 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Field, FieldLabel } from "@/components/ui/field";
 import {
   Home as HomeIcon,
   LayoutDashboard,
@@ -147,7 +149,15 @@ export default function Home() {
         <main className="flex flex-1 flex-col gap-4 p-4">
           <div className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 sm:items-start">
             <div>
-              <Button>Click me</Button>
+              <Field>
+                <FieldLabel htmlFor="input-field-link">Youtube Link</FieldLabel>
+                <Input
+                  id="input-field-link"
+                  type="text"
+                  placeholder="Paste your Youtube Link"
+                />
+              </Field>
+              <Button>Create Chatroom</Button>
             </div>
           </div>
         </main>
