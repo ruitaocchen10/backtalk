@@ -1,16 +1,18 @@
-from openai import OpenAI
+import numpy as np
+from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi
 from urllib.parse import urlparse, parse_qs
 
 load_dotenv()
-client = OpenAI()
-video_url = "https://www.youtube.com/watch?v=0CmtDk-joT4"
+client = AsyncOpenAI()
+
 ytt_api = YouTubeTranscriptApi()
+
 
 def extract_video_id(video_url: str) -> str:
     parsed = urlparse(video_url)
-    
+
     if parsed.hostname in ("www.youtube.com", "youtube.com"):
         return parse_qs(parsed.query)["v"][0]
     elif parsed.hostname == "youtu.be":
@@ -18,10 +20,12 @@ def extract_video_id(video_url: str) -> str:
     else:
         return video_url
 
-def fetch_Transcript(video_url: str) -> str:
+
+def fetch_transcript(video_url: str):
     video_id = extract_video_id(video_url)
     transcript_list = ytt_api.fetch(video_id)
     return transcript_list
+
 
 def chunk_by_timestamp(transcript_list, seconds_per_chunk: int = 60) -> list[dict]:
     chunks = []
@@ -40,10 +44,11 @@ def chunk_by_timestamp(transcript_list, seconds_per_chunk: int = 60) -> list[dic
 
     return chunks
 
-def embed_chunks(chunks: list[dict]) -> list[dict]:
+
+async def embed_chunks(chunks: list[dict]) -> list[dict]:
     texts = [chunk["text"] for chunk in chunks]
 
-    response = client.embeddings.create(
+    response = await client.embeddings.create(
         model="text-embedding-3-small",
         input=texts
     )
@@ -54,10 +59,27 @@ def embed_chunks(chunks: list[dict]) -> list[dict]:
     return chunks
 
 
-transcript = fetch_Transcript(video_url)
-chunks = chunk_by_timestamp(transcript, seconds_per_chunk=30)
-chunks = embed_chunks(chunks)
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    a = np.array(a)
+    b = np.array(b)
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-print(f"Total chunks: {len(chunks)}")
-print(f"Embedding dimension: {len(chunks[0]['embedding'])}")
-print(f"First 5 values of chunk 1's embedding: {chunks[0]['embedding'][:5]}")
+async def retrieve_relevant_chunks(query: str, chunks: list[dict], top_k: int = 3) -> list[str]:
+    # Step 1: Embed the user's query
+    response = await client.embeddings.create(
+        model="text-embedding-3-small",
+        input=[query]
+    )
+    query_embedding = response.data[0].embedding
+
+    # Step 2: Score every chunk by similarity to the query
+    scored = [
+        (cosine_similarity(query_embedding, chunk["embedding"]), chunk)
+        for chunk in chunks
+    ]
+
+    # Step 3: Sort by similarity score, highest first
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    # Return just the text from the top_k chunks
+    return [chunk["text"] for _, chunk in scored[:top_k]]
