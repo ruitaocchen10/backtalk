@@ -1,3 +1,6 @@
+"use client";
+
+import { useState } from "react";
 import {
   Sidebar,
   SidebarContent,
@@ -26,8 +29,38 @@ import {
   Bell,
   HelpCircle,
 } from "lucide-react";
+import { useAudioCapture } from "@/hooks/useAudioCapture";
 
 export default function Home() {
+  const { isRecording, start, stop } = useAudioCapture();
+  const [transcript, setTranscript] = useState("");
+  const [interimTranscript, setInterimTranscript] = useState("");
+
+  const handleClick = () => {
+    if (isRecording) {
+      stop();
+      setTranscript("");
+      setInterimTranscript("");
+    } else {
+      start(
+        (chunk) => {
+          console.log("Got PCM chunk:", chunk.byteLength, "bytes");
+          // Should log 8000 bytes each time (4000 Int16 samples × 2 bytes)
+        },
+        (text, isFinal) => {
+          if (isFinal) {
+            // Append final transcript to the accumulated text
+            setTranscript((prev) => prev + " " + text);
+            setInterimTranscript("");
+          } else {
+            // Show interim results separately
+            setInterimTranscript(text);
+          }
+        },
+      );
+    }
+  };
+
   return (
     <SidebarProvider>
       <Sidebar>
@@ -158,6 +191,26 @@ export default function Home() {
                 />
               </Field>
               <Button>Create Chatroom</Button>
+              <div className="mt-4 space-y-4">
+                <button
+                  onClick={handleClick}
+                  className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+                >
+                  {isRecording ? "Stop Recording" : "Start Recording"}
+                </button>
+
+                {isRecording && (
+                  <div className="p-4 border rounded-lg bg-gray-50">
+                    <h3 className="font-semibold mb-2">Live Transcription:</h3>
+                    <p className="text-gray-800">{transcript}</p>
+                    {interimTranscript && (
+                      <p className="text-gray-400 italic">
+                        {interimTranscript}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </main>
