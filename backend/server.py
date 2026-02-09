@@ -19,7 +19,10 @@ from pipeline.rag import (
     retrieve_relevant_chunks_from_db,
     get_video_by_url,
     get_conversation_by_video,
-    create_conversation
+    create_conversation,
+    get_conversation_by_id,
+    load_conversation_history,
+    save_message
 )
 from pipeline.llm import stream_llm_response
 
@@ -172,11 +175,16 @@ async def create_conversation_endpoint(
 
 @app.websocket("/ws/audio")
 async def audio_ws(websocket: WebSocket):
-    # Extract token from query params
+    # Extract token AND conversation_id from query params
     token = websocket.query_params.get("token")
+    conversation_id = websocket.query_params.get("conversation_id")
 
     if not token:
         await websocket.close(code=1008, reason="Missing auth token")
+        return
+
+    if not conversation_id:
+        await websocket.close(code=1008, reason="Missing conversation_id")
         return
 
     # Verify token and get user_id
@@ -187,22 +195,27 @@ async def audio_ws(websocket: WebSocket):
         return
 
     await websocket.accept()
-    print(f"Client connected (user: {user_id})")
+    print(f"Client connected (user: {user_id}, conversation: {conversation_id})")
 
-    conversation_history: list[dict] = []
+    # Fetch conversation from database
+    conversation = get_conversation_by_id(conversation_id, user_id)
+    if not conversation:
+        await websocket.close(code=1008, reason="Conversation not found")
+        return
+
+    video_id = conversation["video_id"]
+    print(f"Using video_id: {video_id} for conversation: {conversation_id}")
+
+    # Load conversation history from database (not empty list)
+    conversation_history = load_conversation_history(conversation_id)
+    print(f"Loaded {len(conversation_history)} previous messages")
 
     utterance_buffer: str = ""
-
     pause_timer: asyncio.TimerHandle | None = None
-
     PAUSE_TIMEOUT = 2  # seconds
 
-    # For now, hardcode a video for testing.
-    VIDEO_URL = "https://www.youtube.com/watch?v=0CmtDk-joT4"
-
-    # Load the video context (embeddings) at session start.
-    # This happens once per connection, not once per message.
-    video_id = await load_video_context(user_id, VIDEO_URL)
+    # Video chunks are already in DB (loaded during conversation creation)
+    # No need to call load_video_context here
 
     async def trigger_llm(user_text: str):
         nonlocal conversation_history
@@ -240,11 +253,14 @@ async def audio_ws(websocket: WebSocket):
 
         print(f"LLM response: {full_response[:100]}...")
 
-        # Step 3: Append both the user's message and the assistant's
-        # response to conversation history. Next time the LLM is called,
-        # it will see this entire conversation, giving it "memory."
+        # Step 3: Persist messages to database AND append to conversation history
+        save_message(conversation_id, "user", user_text)
+        save_message(conversation_id, "assistant", full_response)
+
         conversation_history.append({"role": "user", "content": user_text})
         conversation_history.append({"role": "assistant", "content": full_response})
+
+        print(f"Saved messages to DB for conversation {conversation_id}")
 
     # ---- Deepgram connection and transcript handling ----
     extra_headers = {

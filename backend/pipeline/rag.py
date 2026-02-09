@@ -189,3 +189,48 @@ async def retrieve_relevant_chunks_from_db(query: str, video_id: str, top_k: int
 
     # Step 3: Extract just the text from the results
     return [row["text"] for row in result.data]
+
+
+def get_conversation_by_id(conversation_id: str, user_id: str) -> dict | None:
+    """
+    Get conversation record by ID, verifying ownership.
+    Returns conversation dict with id, video_id, title, or None if not found.
+    """
+    result = supabase.table("conversations")\
+        .select("id, video_id, title")\
+        .eq("id", conversation_id)\
+        .eq("user_id", user_id)\
+        .single()\
+        .execute()
+
+    if result.data:
+        return result.data
+    return None
+
+
+def load_conversation_history(conversation_id: str) -> list[dict]:
+    """
+    Load existing messages from a conversation.
+    Returns list of message dicts: [{"role": "user", "content": "..."}, ...]
+    """
+    result = supabase.table("messages")\
+        .select("role, content")\
+        .eq("conversation_id", conversation_id)\
+        .order("created_at", ascending=True)\
+        .execute()
+
+    # Convert to format expected by LLM
+    return [{"role": msg["role"], "content": msg["content"]}
+            for msg in result.data]
+
+
+def save_message(conversation_id: str, role: str, content: str) -> None:
+    """
+    Save a message to the database.
+    role: "user" or "assistant"
+    """
+    supabase.table("messages").insert({
+        "conversation_id": conversation_id,
+        "role": role,
+        "content": content
+    }).execute()

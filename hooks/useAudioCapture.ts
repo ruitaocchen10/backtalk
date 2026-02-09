@@ -22,6 +22,7 @@ export function useAudioCapture() {
       onChunk: (chunk: ArrayBuffer) => void,
       onTranscript: (transcript: string, isFinal: boolean) => void,
       onLlmResponse: (text: string, done: boolean) => void,
+      conversationId?: string,
     ) => {
       onChunkRef.current = onChunk;
       onTranscriptRef.current = onTranscript;
@@ -68,8 +69,11 @@ export function useAudioCapture() {
         throw new Error("Not authenticated");
       }
 
-      // Step 5: Open WebSocket with auth token (audio is already flowing into buffer)
-      const ws = new WebSocket(`ws://localhost:8000/ws/audio?token=${token}`);
+      // Step 5: Open WebSocket with auth token and conversation_id
+      const wsUrl = conversationId
+        ? `ws://localhost:8000/ws/audio?token=${token}&conversation_id=${conversationId}`
+        : `ws://localhost:8000/ws/audio?token=${token}`;
+      const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       await new Promise<void>((resolve, reject) => {

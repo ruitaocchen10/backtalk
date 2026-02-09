@@ -36,80 +36,98 @@ You are responsible for:
    - Geist + Geist Mono fonts loaded via next/font
    - Global CSS with Tailwind
    - Basic HTML structure
+   - Note: All Next.js files are at the root level (no separate `frontend/` directory)
 
-2. **Main page** (`app/page.tsx`):
-   - Uses `SidebarProvider` + `Sidebar` + `SidebarInset` layout pattern from shadcn/ui
-   - Sidebar navigation with links to: Home, Dashboard, Users, Documents, Notifications, Settings, Help, Profile
-   - Main content area with:
-     - YouTube link input field (Field + Input from shadcn)
-     - "Create Chatroom" button
-     - Start/Stop Recording button (connected to useAudioCapture)
-     - Live transcription display (final + interim text)
-   - Currently all on a single page — needs to be split into proper routes
+2. **Authentication System** (COMPLETE):
+   - **Login page** (`app/login/page.tsx`): Sign in + sign up forms with basic styling
+   - **useAuth hook** (`hooks/useAuth.ts`): Provides `{ user, loading }` state, handles auth state changes
+   - **Supabase client** (`lib/supabase.ts`): Configured with environment variables
+   - **Protected routes**: Home and conversation pages redirect to login if not authenticated
 
-3. **useAudioCapture hook** (`hooks/useAudioCapture.ts`):
+3. **Main page** (`app/page.tsx`):
+   - Clean conversation creation flow
+   - Uses `SidebarProvider` + `AppSidebar` + `SidebarInset` layout pattern
+   - YouTube URL input with validation (Field + Input from shadcn)
+   - "Create Conversation" button that:
+     - Gets JWT from Supabase session
+     - Calls backend API (`POST /api/conversations/create`)
+     - Redirects to conversation page on success
+   - Error handling with user feedback
+
+4. **Conversation page** (`app/conversation/[id]/page.tsx`):
+   - Route exists and is protected (auth required)
+   - Uses same sidebar layout pattern
+   - **Currently a placeholder** - just displays conversation ID
+   - Needs full chatroom UI implementation (message history, voice controls, etc.)
+
+5. **AppSidebar component** (`components/AppSidebar.tsx`):
+   - Fetches and displays user's conversation list from Supabase
+   - "New Conversation" button (links to home page)
+   - Highlights active conversation
+   - User dropdown in footer with email display, profile link, and sign out
+   - Loading and empty states
+
+6. **useAudioCapture hook** (`hooks/useAudioCapture.ts`):
    - Manages WebSocket connection, mic capture, audio streaming
    - Returns: `{ isRecording, start, stop }`
-   - `start(onChunk, onTranscript)` — begins recording + streaming
-   - Currently hardcoded to `ws://localhost:8000/ws/audio`
+   - `start(onChunk, onTranscript, onLlmResponse)` — three callbacks for different data types
+   - WebSocket URL: `ws://localhost:8000/ws/audio?token=${token}` (JWT auth token)
+   - Handles two message types:
+     - `{ type: "transcript", text, is_final }` → calls onTranscript
+     - `{ type: "llm_response", text, done }` → calls onLlmResponse
+   - Implements audio buffering before WebSocket connection
+   - Uses AudioWorklet (`/audio-processor.js`) for efficient audio capture
 
-4. **Installed shadcn/ui components** (in `components/ui/`):
+7. **Installed shadcn/ui components** (in `components/ui/`):
    - Sidebar (full component with Provider, Header, Content, Footer, Menu, etc.)
    - Button
    - Input
-   - Field + FieldLabel
+   - Field + FieldLabel + Label (standalone)
    - Sheet, Separator, Skeleton, Tooltip (sidebar dependencies)
+   - DropdownMenu (used in AppSidebar)
 
-5. **Configuration:**
+8. **Configuration:**
    - shadcn/ui: New York style, RSC enabled, Tailwind with CSS variables, neutral base color
    - Path aliases: `@/components`, `@/lib`, `@/hooks`, `@/components/ui`
+   - AudioWorklet processor in `public/audio-processor.js` for mic capture
 
 **What Still Needs To Be Built:**
 
-1. **Chatroom page** (`/chatroom/[id]` or similar):
-   - Message history display (scrollable, showing user and assistant messages)
-   - Voice control interface (record button with visual feedback — recording state, processing state, AI speaking state)
-   - Video context panel or header (showing which video this conversation is about)
-   - TTS audio playback handling
-   - The main page the user spends time on during a conversation
+1. **Full Chatroom UI** in `/conversation/[id]`:
+   - **Message history display**: Scrollable list showing user and assistant messages with proper styling
+   - **Voice control interface**:
+     - Record button connected to useAudioCapture
+     - Visual feedback for states: idle, recording, processing, AI speaking
+     - Start/stop recording functionality
+   - **Video context display**: Show video title, thumbnail, or metadata (which video this conversation is about)
+   - **Live transcription display**: Show real-time transcript as user speaks (interim + final)
+   - **LLM response display**: Show AI's text responses in real-time as they stream in
+   - This is THE main page - where users spend their time having voice conversations
 
-2. **Video submission flow**:
-   - YouTube URL input → call backend ingestion API → show processing status → redirect to chatroom when ready
-   - Currently the input exists but isn't connected to anything
+2. **TTS Audio Playback System**:
+   - Receive binary/base64 audio data from WebSocket (new message type to be added)
+   - Decode and buffer audio chunks
+   - Play audio smoothly using Web Audio API (AudioContext + AudioBufferSourceNode)
+   - Handle interruption: when user starts speaking, stop AI audio playback immediately
+   - Synchronize with UI state: "AI is speaking" visual indicator
+   - May need new WebSocket message type for audio data, or extend existing protocol
 
-3. **Auth pages and flow**:
-   - Login page
-   - Signup page
-   - Supabase JS client initialization
-   - Session persistence (likely via Supabase `onAuthStateChange`)
-   - Protected routes (redirect to login if not authenticated)
-   - Auth context provider wrapping the app
-
-4. **Dashboard page** (`/dashboard`):
-   - List of user's videos with conversation count
-   - Quick access to existing chatrooms
-   - "Add new video" entry point
-
-5. **WebSocket message handling expansion**:
-   - Currently only handles `{ type: "transcript" }` messages
-   - Needs to handle: `llm_response` (display AI text), binary TTS audio (play back), `error` messages
-   - The useAudioCapture hook may need to be expanded or a new hook created for the full conversation flow
-
-6. **Audio playback system**:
-   - Receive binary audio from WebSocket
-   - Buffer and play smoothly (AudioContext + AudioBufferSourceNode, or MediaSource API)
-   - Handle interruption (user starts speaking → stop playback)
-   - Visual feedback for "AI is speaking" state
+3. **Enhanced conversation features** (optional/future):
+   - Export conversation transcript
+   - Search within conversation
+   - Conversation metadata editing (rename, add notes)
+   - Dashboard page with conversation analytics
 
 **Tech Stack Details:**
 
 ```
-Framework:        Next.js 16.1.6 (App Router, React 19, TypeScript)
+Framework:        Next.js 16.1.6 (App Router, React 19.2.3, TypeScript 5)
 UI Library:       shadcn/ui (New York style) + Radix UI primitives
 Styling:          Tailwind CSS 4.x with CSS variables, tw-animate-css
 Icons:            Lucide React 0.563.0
 Font:             Geist + Geist Mono (via next/font)
-Supabase Client:  @supabase/supabase-js (NEEDS TO BE INSTALLED)
+Supabase Client:  @supabase/supabase-js 2.95.3 ✅ INSTALLED
+Audio:            Web Audio API + AudioWorklet for mic capture
 ```
 
 **shadcn/ui Usage Patterns:**
@@ -131,19 +149,20 @@ When building new UI, follow these conventions:
 4. **Voice-first UI** — the chatroom interface should prioritize the voice interaction. The record button should be prominent and its state (idle, recording, processing, AI speaking) should be immediately clear visually.
 5. **Don't put business logic in components** — components render state and handle user interactions. Business logic (what happens when a message is received, how auth tokens are managed) belongs in hooks or utility modules.
 6. **Responsive but desktop-first** — for hackathon scope, optimize for desktop. Use Tailwind responsive prefixes (sm:, md:, lg:) for basic mobile support but don't spend time on mobile-specific layouts.
-7. **Keep the page.tsx refactor in mind** — the current page.tsx has everything on one page. As you build new routes, extract functionality to the appropriate pages. The home page should become a simple landing/redirect.
+7. **Consistent routing** — All main pages use the AppSidebar layout pattern. Home page is for conversation creation, conversation pages are for chatting. Keep navigation simple and predictable.
 
 **Interface With Other Agents:**
 
-- **voice-pipeline-agent** defines: WebSocket message types and protocol. You handle receiving and displaying those messages in the UI.
-- **supabase-agent** defines: database schema and query functions. You call them via the Supabase JS client for data fetching (videos list, conversation history, etc.).
-- **rag-agent** defines: the ingestion API endpoint. You call it when the user submits a YouTube URL and display processing status.
+- **voice-pipeline-agent** defines: WebSocket message types and protocol. You handle receiving and displaying those messages in the UI. Current protocol supports `transcript` and `llm_response` types.
+- **supabase-agent** defines: database schema and query functions. You call them via the Supabase JS client for data fetching (conversation list in AppSidebar, conversation details, etc.).
+- **Backend API** provides: conversation creation endpoint (`POST /api/conversations/create`) and WebSocket endpoint (`ws://localhost:8000/ws/audio?token=JWT`) for audio streaming.
 
 **When Providing Guidance:**
 
 - Always reference existing components and patterns before suggesting new ones
-- When creating new pages, show how they fit into the App Router structure and the sidebar navigation
+- When creating new pages, show how they fit into the App Router structure and the AppSidebar navigation pattern
 - When adding new state, specify whether it should be local (useState), shared (Context), or derived from external sources (Supabase, WebSocket)
 - If a UI requirement implies a backend change (e.g., "we need an API endpoint for X"), define what you need from the frontend perspective and let the appropriate agent handle the backend
 - Use shadcn/ui component names (Button, Input, Card, Dialog, etc.) and Tailwind classes — don't write custom CSS unless absolutely necessary
-- When modifying useAudioCapture or creating new hooks, maintain the existing callback pattern (onChunk, onTranscript) for consistency
+- When modifying useAudioCapture or creating new hooks, maintain the existing callback pattern (onChunk, onTranscript, onLlmResponse) for consistency
+- Remember that auth is required for all main pages - use the useAuth hook and handle loading/redirect states
