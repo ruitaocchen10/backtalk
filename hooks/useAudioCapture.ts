@@ -1,4 +1,5 @@
 import { useRef, useState, useCallback } from "react";
+import { supabase } from "@/lib/supabase";
 
 export function useAudioCapture() {
   const wsRef = useRef<WebSocket | null>(null);
@@ -12,15 +13,19 @@ export function useAudioCapture() {
   const onTranscriptRef = useRef<
     ((transcript: string, isFinal: boolean) => void) | null
   >(null);
+  const onLlmResponseRef = useRef<
+    ((text: string, done: boolean) => void) | null
+  >(null);
 
   const start = useCallback(
     async (
       onChunk: (chunk: ArrayBuffer) => void,
       onTranscript: (transcript: string, isFinal: boolean) => void,
+      onLlmResponse: (text: string, done: boolean) => void,
     ) => {
       onChunkRef.current = onChunk;
       onTranscriptRef.current = onTranscript;
-
+      onLlmResponseRef.current = onLlmResponse;
       // Step 1: Get mic stream FIRST
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -55,8 +60,16 @@ export function useAudioCapture() {
 
       source.connect(workletNode);
 
-      // Step 4: Open WebSocket (audio is already flowing into buffer)
-      const ws = new WebSocket("ws://localhost:8000/ws/audio");
+      // Step 4: Get auth token
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+
+      if (!token) {
+        throw new Error("Not authenticated");
+      }
+
+      // Step 5: Open WebSocket with auth token (audio is already flowing into buffer)
+      const ws = new WebSocket(`ws://localhost:8000/ws/audio?token=${token}`);
       wsRef.current = ws;
 
       await new Promise<void>((resolve, reject) => {
@@ -77,6 +90,8 @@ export function useAudioCapture() {
           const data = JSON.parse(event.data);
           if (data.type === "transcript") {
             onTranscriptRef.current?.(data.text, data.is_final);
+          } else if (data.type === "llm_response") {
+            onLlmResponseRef.current?.(data.text, data.done);
           }
         } catch (err) {
           console.error("Error parsing message:", err);
@@ -101,6 +116,8 @@ export function useAudioCapture() {
 
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
+
+    onLlmResponseRef.current = null;
 
     onChunkRef.current = null;
     onTranscriptRef.current = null;

@@ -1,216 +1,137 @@
 "use client";
 
-import { useState } from "react";
-import {
-  Sidebar,
-  SidebarContent,
-  SidebarFooter,
-  SidebarGroup,
-  SidebarGroupContent,
-  SidebarGroupLabel,
-  SidebarHeader,
-  SidebarInset,
-  SidebarMenu,
-  SidebarMenuButton,
-  SidebarMenuItem,
-  SidebarProvider,
-  SidebarRail,
-  SidebarTrigger,
-} from "@/components/ui/sidebar";
+import { useState, useEffect } from "react";
+import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field, FieldLabel } from "@/components/ui/field";
-import {
-  Home as HomeIcon,
-  LayoutDashboard,
-  Settings,
-  Users,
-  FileText,
-  Bell,
-  HelpCircle,
-} from "lucide-react";
-import { useAudioCapture } from "@/hooks/useAudioCapture";
+import { useAuth } from "@/hooks/useAuth";
+import { useRouter } from "next/navigation";
+import { supabase } from "@/lib/supabase";
+import { AppSidebar } from "@/components/AppSidebar";
 
 export default function Home() {
-  const { isRecording, start, stop } = useAudioCapture();
-  const [transcript, setTranscript] = useState("");
-  const [interimTranscript, setInterimTranscript] = useState("");
+  const { user, loading } = useAuth();
+  const router = useRouter();
+  const [youtubeUrl, setYoutubeUrl] = useState("");
+  const [isCreating, setIsCreating] = useState(false);
+  const [error, setError] = useState("");
 
-  const handleClick = () => {
-    if (isRecording) {
-      stop();
-      setTranscript("");
-      setInterimTranscript("");
-    } else {
-      start(
-        (chunk) => {
-          console.log("Got PCM chunk:", chunk.byteLength, "bytes");
-          // Should log 8000 bytes each time (4000 Int16 samples × 2 bytes)
+  // Redirect to login if not authenticated
+  useEffect(() => {
+    if (!loading && !user) {
+      router.push("/login");
+    }
+  }, [user, loading, router]);
+
+  // Show nothing while checking auth status
+  if (loading || !user) {
+    return null;
+  }
+
+  const handleCreateConversation = async () => {
+    // Clear any previous errors
+    setError("");
+
+    // Basic YouTube URL validation
+    const youtubeRegex = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+$/;
+    if (!youtubeUrl.trim()) {
+      setError("Please enter a YouTube URL");
+      return;
+    }
+    if (!youtubeRegex.test(youtubeUrl.trim())) {
+      setError("Please enter a valid YouTube URL");
+      return;
+    }
+
+    setIsCreating(true);
+
+    try {
+      // Get the user's JWT token from Supabase session
+      const { data: { session } } = await supabase.auth.getSession();
+
+      if (!session?.access_token) {
+        setError("Authentication required. Please log in again.");
+        setIsCreating(false);
+        router.push("/login");
+        return;
+      }
+
+      // Call the backend API to create conversation
+      const response = await fetch("http://localhost:8000/api/conversations/create", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${session.access_token}`,
         },
-        (text, isFinal) => {
-          if (isFinal) {
-            // Append final transcript to the accumulated text
-            setTranscript((prev) => prev + " " + text);
-            setInterimTranscript("");
-          } else {
-            // Show interim results separately
-            setInterimTranscript(text);
-          }
-        },
-      );
+        body: JSON.stringify({
+          youtube_url: youtubeUrl.trim(),
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Server error: ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      // Navigate to the conversation page
+      router.push(`/conversation/${data.conversation_id}`);
+
+    } catch (err) {
+      console.error("Error creating conversation:", err);
+      setError(err instanceof Error ? err.message : "Failed to create conversation. Please try again.");
+      setIsCreating(false);
     }
   };
 
   return (
     <SidebarProvider>
-      <Sidebar>
-        <SidebarHeader>
-          <SidebarMenu>
-            <SidebarMenuItem>
-              <SidebarMenuButton size="lg" asChild>
-                <a href="/">
-                  <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-                    <HomeIcon />
-                  </div>
-                  <div className="flex flex-col gap-0.5 leading-none">
-                    <span className="font-semibold">BackTalk</span>
-                    <span className="text-xs">v1.0.0</span>
-                  </div>
-                </a>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </SidebarMenu>
-        </SidebarHeader>
-
-        <SidebarContent>
-          <SidebarGroup>
-            <SidebarGroupLabel>Navigation</SidebarGroupLabel>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                <SidebarMenuItem>
-                  <SidebarMenuButton asChild isActive>
-                    <a href="/">
-                      <HomeIcon />
-                      <span>Home</span>
-                    </a>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-                <SidebarMenuItem>
-                  <SidebarMenuButton asChild>
-                    <a href="/dashboard">
-                      <LayoutDashboard />
-                      <span>Dashboard</span>
-                    </a>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-                <SidebarMenuItem>
-                  <SidebarMenuButton asChild>
-                    <a href="/users">
-                      <Users />
-                      <span>Users</span>
-                    </a>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-                <SidebarMenuItem>
-                  <SidebarMenuButton asChild>
-                    <a href="/documents">
-                      <FileText />
-                      <span>Documents</span>
-                    </a>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-                <SidebarMenuItem>
-                  <SidebarMenuButton asChild>
-                    <a href="/notifications">
-                      <Bell />
-                      <span>Notifications</span>
-                    </a>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
-
-          <SidebarGroup>
-            <SidebarGroupLabel>Other</SidebarGroupLabel>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                <SidebarMenuItem>
-                  <SidebarMenuButton asChild>
-                    <a href="/settings">
-                      <Settings />
-                      <span>Settings</span>
-                    </a>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-                <SidebarMenuItem>
-                  <SidebarMenuButton asChild>
-                    <a href="/help">
-                      <HelpCircle />
-                      <span>Help</span>
-                    </a>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
-        </SidebarContent>
-
-        <SidebarFooter>
-          <SidebarMenu>
-            <SidebarMenuItem>
-              <SidebarMenuButton asChild>
-                <a href="/profile">
-                  <Users />
-                  <span>Profile</span>
-                </a>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </SidebarMenu>
-        </SidebarFooter>
-
-        <SidebarRail />
-      </Sidebar>
+      <AppSidebar userEmail={user?.email} />
 
       <SidebarInset>
-        <header className="flex h-16 shrink-0 items-center gap-2 border-b px-4">
-          <SidebarTrigger />
-          <div className="flex items-center gap-2">
-            <span className="font-semibold">Welcome to BackTalk</span>
-          </div>
-        </header>
-        <main className="flex flex-1 flex-col gap-4 p-4">
-          <div className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 sm:items-start">
-            <div>
+        <main className="flex flex-1 items-center justify-center p-8">
+          <div className="w-full max-w-xl space-y-6">
+            <div className="text-center space-y-2">
+              <h1 className="text-3xl font-bold">Start a New Conversation</h1>
+              <p className="text-muted-foreground">
+                Enter a YouTube video URL to begin analyzing and discussing its content
+              </p>
+            </div>
+
+            <div className="space-y-4">
               <Field>
-                <FieldLabel htmlFor="input-field-link">Youtube Link</FieldLabel>
+                <FieldLabel htmlFor="youtube-url">YouTube URL</FieldLabel>
                 <Input
-                  id="input-field-link"
+                  id="youtube-url"
                   type="text"
-                  placeholder="Paste your Youtube Link"
+                  placeholder="https://www.youtube.com/watch?v=..."
+                  value={youtubeUrl}
+                  onChange={(e) => setYoutubeUrl(e.target.value)}
+                  disabled={isCreating}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !isCreating) {
+                      handleCreateConversation();
+                    }
+                  }}
                 />
               </Field>
-              <Button>Create Chatroom</Button>
-              <div className="mt-4 space-y-4">
-                <button
-                  onClick={handleClick}
-                  className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
-                >
-                  {isRecording ? "Stop Recording" : "Start Recording"}
-                </button>
 
-                {isRecording && (
-                  <div className="p-4 border rounded-lg bg-gray-50">
-                    <h3 className="font-semibold mb-2">Live Transcription:</h3>
-                    <p className="text-gray-800">{transcript}</p>
-                    {interimTranscript && (
-                      <p className="text-gray-400 italic">
-                        {interimTranscript}
-                      </p>
-                    )}
-                  </div>
-                )}
-              </div>
+              {error && (
+                <div className="text-sm text-red-500 text-center">
+                  {error}
+                </div>
+              )}
+
+              <Button
+                onClick={handleCreateConversation}
+                disabled={isCreating}
+                className="w-full"
+                size="lg"
+              >
+                {isCreating ? "Creating Conversation..." : "Create Conversation"}
+              </Button>
             </div>
           </div>
         </main>

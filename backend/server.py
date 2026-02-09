@@ -1,41 +1,193 @@
 import websockets
 import json
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import uvicorn
 import os
 import asyncio
 from dotenv import load_dotenv
+from supabase_client import supabase
 
-from pipeline.rag import fetch_transcript, chunk_by_timestamp, embed_chunks, retrieve_relevant_chunks
+from pipeline.rag import (
+    fetch_transcript,
+    chunk_by_timestamp,
+    embed_chunks,
+    get_or_create_video,
+    get_chunks_from_db,
+    store_chunks_in_db,
+    retrieve_relevant_chunks_from_db,
+    get_video_by_url,
+    get_conversation_by_video,
+    create_conversation
+)
 from pipeline.llm import stream_llm_response
 
 load_dotenv()
 
 app = FastAPI()
 
+# Configure CORS to allow requests from the Next.js frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # Next.js dev server
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all HTTP methods
+    allow_headers=["*"],  # Allow all headers
+)
+
 DEEPGRAM_URL = "wss://api.deepgram.com/v1/listen?encoding=linear16&sample_rate=16000&channels=1&model=nova-3&interim_results=true"
 
-video_chunks_cache: dict[str, list[dict]] = {}
+
+# Pydantic models for REST API
+class CreateConversationRequest(BaseModel):
+    youtube_url: str
 
 
-async def load_video_context(video_url: str) -> list[dict]:
-    if video_url in video_chunks_cache:
-        print(f"Using cached chunks for {video_url}")
-        return video_chunks_cache[video_url]
+class CreateConversationResponse(BaseModel):
+    conversation_id: str
+    video_id: str
+    title: str
 
-    print(f"Loading and embedding video: {video_url}")
-    transcript = fetch_transcript(video_url)
+
+def verify_supabase_token(token: str) -> str | None:
+    """
+    Verify Supabase JWT token using Supabase client and return user_id.
+    Returns None if token is invalid.
+    """
+    try:
+        # Use Supabase client to verify the token
+        # This properly handles ES256 and other algorithms
+        response = supabase.auth.get_user(token)
+
+        if response.user:
+            user_id = response.user.id
+            print(f"Successfully verified token for user: {user_id}")
+            return user_id
+        else:
+            print("ERROR: No user found in token response")
+            return None
+
+    except Exception as e:
+        print(f"Token verification failed: {type(e).__name__}: {e}")
+        return None
+
+
+async def load_video_context(user_id: str, video_url: str, title: str = None) -> str:
+    """
+    Ensure video chunks are in Supabase. Returns video_id.
+    """
+    # Get or create the video record in DB
+    video_id = get_or_create_video(user_id, video_url, title)
+
+    # Check if we've already processed this video
+    if get_chunks_from_db(video_id):
+        print(f"Chunks already exist in DB for video {video_id}")
+        return video_id
+
+    # If not, process the video
+    print(f"Processing and embedding video: {video_url}")
+    transcript, video_title = fetch_transcript(video_url)
     chunks = chunk_by_timestamp(transcript, seconds_per_chunk=30)
     chunks = await embed_chunks(chunks)
-    video_chunks_cache[video_url] = chunks
-    print(f"Loaded {len(chunks)} chunks for video")
-    return chunks
+
+    # Store in Supabase
+    store_chunks_in_db(video_id, chunks)
+    print(f"Stored {len(chunks)} chunks for video {video_id}")
+
+    return video_id
+
+
+@app.post("/api/conversations/create", response_model=CreateConversationResponse)
+async def create_conversation_endpoint(
+    request: CreateConversationRequest,
+    authorization: str = Header(None)
+):
+    """
+    Create a new conversation for a YouTube video.
+
+    1. Verifies user authentication via JWT token
+    2. Checks if video/conversation already exists
+    3. Processes video (transcript + embeddings) if new
+    4. Creates conversation record
+    5. Returns conversation_id, video_id, and title
+    """
+    # Extract and verify JWT token
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+
+    token = authorization.replace("Bearer ", "")
+    user_id = verify_supabase_token(token)
+
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    # Validate YouTube URL
+    youtube_url = request.youtube_url.strip()
+    if not youtube_url:
+        raise HTTPException(status_code=400, detail="YouTube URL is required")
+
+    try:
+        # Check if video already exists for this user
+        existing_video = get_video_by_url(user_id, youtube_url)
+
+        if existing_video:
+            # Video exists, check if conversation already exists
+            existing_conversation = get_conversation_by_video(user_id, existing_video["id"])
+
+            if existing_conversation:
+                # Return existing conversation
+                print(f"Returning existing conversation {existing_conversation['id']}")
+                return CreateConversationResponse(
+                    conversation_id=existing_conversation["id"],
+                    video_id=existing_video["id"],
+                    title=existing_conversation["title"] or existing_video["title"] or "Untitled"
+                )
+
+        # Video is new or no conversation exists yet - process it
+        print(f"Processing new video: {youtube_url}")
+
+        # Fetch transcript and get video title
+        _, video_title = fetch_transcript(youtube_url)
+        title = video_title or "Untitled Video"
+
+        # Process video (creates/gets video record and stores embeddings)
+        video_id = await load_video_context(user_id, youtube_url, title)
+
+        # Create new conversation
+        conversation_id = create_conversation(user_id, video_id, title)
+
+        print(f"Created conversation {conversation_id} for video {video_id}")
+
+        return CreateConversationResponse(
+            conversation_id=conversation_id,
+            video_id=video_id,
+            title=title
+        )
+
+    except Exception as e:
+        print(f"Error creating conversation: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create conversation: {str(e)}")
 
 
 @app.websocket("/ws/audio")
 async def audio_ws(websocket: WebSocket):
+    # Extract token from query params
+    token = websocket.query_params.get("token")
+
+    if not token:
+        await websocket.close(code=1008, reason="Missing auth token")
+        return
+
+    # Verify token and get user_id
+    user_id = verify_supabase_token(token)
+
+    if not user_id:
+        await websocket.close(code=1008, reason="Invalid auth token")
+        return
+
     await websocket.accept()
-    print("Client connected")
+    print(f"Client connected (user: {user_id})")
 
     conversation_history: list[dict] = []
 
@@ -50,7 +202,7 @@ async def audio_ws(websocket: WebSocket):
 
     # Load the video context (embeddings) at session start.
     # This happens once per connection, not once per message.
-    video_chunks = await load_video_context(VIDEO_URL)
+    video_id = await load_video_context(user_id, VIDEO_URL)
 
     async def trigger_llm(user_text: str):
         nonlocal conversation_history
@@ -58,8 +210,8 @@ async def audio_ws(websocket: WebSocket):
         print(f"User said: {user_text}")
 
         # Step 1: Find relevant video chunks for what the user asked.
-        relevant_chunks = await retrieve_relevant_chunks(
-            user_text, video_chunks, top_k=3
+        relevant_chunks = await retrieve_relevant_chunks_from_db(
+            user_text, video_id, top_k=3
         )
         print(f"Retrieved {len(relevant_chunks)} relevant chunks")
 
