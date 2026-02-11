@@ -216,7 +216,7 @@ def load_conversation_history(conversation_id: str) -> list[dict]:
     result = supabase.table("messages")\
         .select("role, content")\
         .eq("conversation_id", conversation_id)\
-        .order("created_at", ascending=True)\
+        .order("created_at", desc=False)\
         .execute()
 
     # Convert to format expected by LLM

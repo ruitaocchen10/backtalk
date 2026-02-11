@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import { useAuth } from "@/hooks/useAuth";
@@ -55,6 +55,13 @@ export default function ConversationPage() {
     final: "",
   });
   const [streamingResponse, setStreamingResponse] = useState<string>("");
+  const streamingResponseRef = useRef<string>("");
+
+  // Audio playback state
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const nextPlayTimeRef = useRef<number>(0);
+  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
+  const audioSourcesRef = useRef<AudioBufferSourceNode[]>([]);
 
   // Audio capture hook
   const { isRecording, start, stop } = useAudioCapture();
@@ -100,11 +107,14 @@ export default function ConversationPage() {
                 ]);
               }
 
+              // Clear transcript immediately after adding message to prevent duplicate display
+              setTranscript({ interim: "", final: "" });
+
               return "processing";
             }
             return currentState;
           });
-        }, 2500); // Slightly longer than backend's 2s pause timeout
+        }, 4000); // Slightly longer than backend's 3.5s pause timeout
       } else {
         // Show interim text (gray, italic)
         setTranscript((prev) => ({
@@ -120,7 +130,7 @@ export default function ConversationPage() {
     (text: string, done: boolean) => {
       if (done) {
         // Response complete - finalize it
-        const finalResponse = streamingResponse;
+        const finalResponse = streamingResponseRef.current;
         if (finalResponse) {
           setMessages((prev) => [
             ...prev,
@@ -133,10 +143,10 @@ export default function ConversationPage() {
           ]);
         }
 
-        // Reset state
+        // Reset text state (audio will play next)
+        streamingResponseRef.current = "";
         setStreamingResponse("");
-        setTranscript({ interim: "", final: "" });
-        setUiState("idle");
+        // Don't set to idle yet - wait for TTS to complete
       } else {
         // Accumulate streaming tokens
         setUiState((currentState) => {
@@ -147,11 +157,93 @@ export default function ConversationPage() {
           return currentState;
         });
 
+        // Update both ref and state
+        streamingResponseRef.current += text;
         setStreamingResponse((prev) => prev + text);
       }
     },
-    [streamingResponse]
+    []
   );
+
+  // Handle incoming TTS audio (one complete WAV file per sentence).
+  // Uses decodeAudioData so the browser handles the WAV header, sample rate,
+  // and any required resampling — avoiding the 2× speed bug caused by
+  // manually creating an AudioBuffer at a mismatched sample rate.
+  const handleTtsAudio = useCallback(async (audioData: ArrayBuffer) => {
+    try {
+      // Initialize audio context on first sentence (use the browser's native
+      // sample rate so no cross-rate scheduling issues arise).
+      if (!audioContextRef.current) {
+        audioContextRef.current = new AudioContext();
+        nextPlayTimeRef.current = audioContextRef.current.currentTime;
+        console.log(`AudioContext initialized at ${audioContextRef.current.sampleRate}Hz`);
+      }
+
+      const audioContext = audioContextRef.current;
+
+      // decodeAudioData correctly parses the WAV header (sample rate, channels,
+      // bit depth) and returns an AudioBuffer at the AudioContext's native rate.
+      const audioBuffer = await audioContext.decodeAudioData(audioData);
+
+      // Create audio source node
+      const source = audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioContext.destination);
+
+      // Schedule this sentence to play immediately after the previous one
+      const startTime = Math.max(
+        audioContext.currentTime,
+        nextPlayTimeRef.current
+      );
+
+      source.start(startTime);
+
+      // Advance the playhead to after this sentence finishes
+      nextPlayTimeRef.current = startTime + audioBuffer.duration;
+
+      // Track sources for cleanup
+      audioSourcesRef.current.push(source);
+
+      if (!isPlayingAudio) {
+        setIsPlayingAudio(true);
+      }
+
+      console.log(
+        `Scheduled sentence audio: ${audioBuffer.duration.toFixed(2)}s at ${startTime.toFixed(2)}s`
+      );
+    } catch (error) {
+      console.error("Error playing TTS audio:", error);
+    }
+  }, [isPlayingAudio]);
+
+  // Handle TTS completion
+  const handleTtsDone = useCallback(() => {
+    console.log("TTS generation complete");
+
+    // Wait for all scheduled audio to finish playing
+    if (audioContextRef.current) {
+      const remainingTime =
+        nextPlayTimeRef.current - audioContextRef.current.currentTime;
+
+      if (remainingTime > 0) {
+        console.log(`Waiting ${remainingTime.toFixed(2)}s for audio to finish`);
+        setTimeout(() => {
+          console.log("Audio playback completed");
+          setIsPlayingAudio(false);
+          setUiState("idle");
+          audioSourcesRef.current = [];
+        }, remainingTime * 1000);
+      } else {
+        // Audio already finished
+        setIsPlayingAudio(false);
+        setUiState("idle");
+        audioSourcesRef.current = [];
+      }
+    } else {
+      // No audio was played
+      setUiState("idle");
+    }
+  }, []);
 
   // Start recording handler
   const handleStartRecording = useCallback(async () => {
@@ -159,8 +251,19 @@ export default function ConversationPage() {
       setUiState("recording");
       setTranscript({ interim: "", final: "" });
       setStreamingResponse("");
+      streamingResponseRef.current = "";
+      setIsPlayingAudio(false);
+      nextPlayTimeRef.current = 0;
+      audioSourcesRef.current = [];
 
-      await start(handleAudioChunk, handleTranscript, handleLlmResponse, conversationId);
+      await start(
+        handleAudioChunk,
+        handleTranscript,
+        handleLlmResponse,
+        handleTtsAudio,
+        handleTtsDone,
+        conversationId
+      );
     } catch (error) {
       console.error("Failed to start recording:", error);
       setError(
@@ -170,7 +273,15 @@ export default function ConversationPage() {
       );
       setUiState("error");
     }
-  }, [start, handleAudioChunk, handleTranscript, handleLlmResponse, conversationId]);
+  }, [
+    start,
+    handleAudioChunk,
+    handleTranscript,
+    handleLlmResponse,
+    handleTtsAudio,
+    handleTtsDone,
+    conversationId,
+  ]);
 
   // Stop recording handler
   const handleStopRecording = useCallback(() => {

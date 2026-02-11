@@ -25,6 +25,7 @@ from pipeline.rag import (
     save_message
 )
 from pipeline.llm import stream_llm_response
+from pipeline.tts import stream_tts_audio
 
 load_dotenv()
 
@@ -212,7 +213,7 @@ async def audio_ws(websocket: WebSocket):
 
     utterance_buffer: str = ""
     pause_timer: asyncio.TimerHandle | None = None
-    PAUSE_TIMEOUT = 2  # seconds
+    PAUSE_TIMEOUT = 2.5  # seconds - allows for natural pauses in speech
 
     # Video chunks are already in DB (loaded during conversation creation)
     # No need to call load_video_context here
@@ -228,32 +229,94 @@ async def audio_ws(websocket: WebSocket):
         )
         print(f"Retrieved {len(relevant_chunks)} relevant chunks")
 
-        # Step 2: Stream LLM response back to the browser.
+        # Step 2 & 3: Stream LLM response AND generate TTS in parallel (sentence-by-sentence)
         full_response = ""
+        sentence_buffer = ""
+        sentence_queue = asyncio.Queue()
 
+        # Background task to process sentences and generate TTS
+        async def process_tts_sentences():
+            """
+            Continuously pulls complete sentences from the queue and generates TTS audio.
+            This runs in parallel with LLM token streaming for lower latency.
+            """
+            try:
+                while True:
+                    sentence = await sentence_queue.get()
+                    if sentence is None:  # Sentinel value to stop
+                        break
+
+                    print(f"Generating TTS for sentence: {sentence[:50]}...")
+
+                    # Generate and stream TTS audio for this sentence
+                    async for audio_chunk in stream_tts_audio(sentence):
+                        await websocket.send_bytes(audio_chunk)
+
+                    # Signal to the frontend that this sentence's audio is fully sent
+                    # The frontend uses this to know it has a complete WAV file ready to decode
+                    await websocket.send_json({"type": "sentence_audio_done"})
+
+                    sentence_queue.task_done()
+            except Exception as e:
+                print(f"TTS sentence processing error: {e}")
+
+        # Start the TTS background task
+        tts_task = asyncio.create_task(process_tts_sentences())
+
+        # Stream LLM tokens and detect sentence boundaries
+        token_count = 0
         async for token in stream_llm_response(
             user_text, relevant_chunks, conversation_history
         ):
             full_response += token
-            # Send each token to the browser as it arrives.
-            # The frontend will accumulate these into the displayed response.
+            sentence_buffer += token
+            token_count += 1
+
+            # Send each token to the browser as it arrives (maintains text streaming)
             await websocket.send_json({
                 "type": "llm_response",
                 "text": token,
                 "done": False
             })
 
-        # Signal to the frontend that the response is complete.
-        # This lets the UI know to finalize the message display.
+            # Log first few tokens to verify streaming
+            if token_count <= 5:
+                print(f"Token {token_count}: '{token}'")
+
+            # Detect sentence boundaries for TTS
+            # Check if accumulated buffer ends with sentence punctuation
+            stripped_buffer = sentence_buffer.strip()
+            if stripped_buffer and (stripped_buffer.endswith(('.', '!', '?')) or '\n\n' in sentence_buffer):
+                # Complete sentence - queue it for TTS generation
+                await sentence_queue.put(stripped_buffer)
+                print(f"✓ Sentence complete! Queued for TTS: {stripped_buffer[:60]}...")
+                sentence_buffer = ""
+
+        # Handle any remaining text that didn't end with punctuation
+        if sentence_buffer.strip():
+            await sentence_queue.put(sentence_buffer.strip())
+            print(f"Queued final fragment for TTS: {sentence_buffer[:50]}...")
+
+        # Signal to the frontend that the LLM response text is complete
         await websocket.send_json({
             "type": "llm_response",
             "text": "",
             "done": True
         })
 
-        print(f"LLM response: {full_response[:100]}...")
+        print(f"LLM response complete: {full_response[:100]}...")
 
-        # Step 3: Persist messages to database AND append to conversation history
+        # Wait for all TTS generation to complete
+        await sentence_queue.put(None)  # Signal TTS task to stop
+        await tts_task
+
+        # Signal that all TTS audio is complete
+        await websocket.send_json({
+            "type": "tts_done"
+        })
+        print("All TTS audio streaming completed")
+
+        # Step 4: Persist messages to database AND append to conversation history
         save_message(conversation_id, "user", user_text)
         save_message(conversation_id, "assistant", full_response)
 
